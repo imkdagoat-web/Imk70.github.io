@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="CONTRAST - a one-tap, black-and-white reflex game. Stay seen.">
+<title>Contrast</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #000; overflow: hidden;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent; overscroll-behavior: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Contrast game. Tap or press space to flip color."></canvas>
+<script>
+(() => {
+  'use strict';
+
+  // ---------- setup ----------
+  const cvs = document.getElementById('c');
+  const ctx = cvs.getContext('2d');
+  const ACCENT = '#ff2d55';
+  const FONT = "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif";
+  const GRACE = 0.11;   // seconds you may blend in before you vanish
+  const PERFECT = 0.05; // seconds either side of a boundary that count as perfect
+
+  let W, H, DPR, R, PY;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 3);
+    W = window.innerWidth; H = window.innerHeight;
+    cvs.width = Math.round(W * DPR); cvs.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    R = Math.max(14, Math.min(W, H) * 0.045);
+    PY = H * 0.72;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : +v; } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+  };
+  let best = store.get('contrast.best', 0);
+
+  const lerp = (a, b, k) => a + (b - a) * k;
+  const clamp01 = (k) => Math.max(0, Math.min(1, k));
+
+  // ---------- sound + haptics ----------
+  let ac = null;
+  function audio() {
+    if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (ac && ac.state === 'suspended') ac.resume();
+  }
+  function beep(freq, dur, type = 'square', vol = 0.05) {
+    if (!ac) return;
+    const t0 = ac.currentTime;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t0);
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(ac.destination);
+    o.start(t0); o.stop(t0 + dur);
+  }
+  function crash() {
+    if (!ac) return;
+    const t0 = ac.currentTime;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(220, t0);
+    o.frequency.exponentialRampToValueAtTime(40, t0 + 0.45);
+    g.gain.setValueAtTime(0.09, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.5);
+    o.connect(g).connect(ac.destination);
+    o.start(t0); o.stop(t0 + 0.5);
+  }
+  function buzz(p) { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} }
+
+  // ---------- state ----------
+  let state = 'menu'; // menu | play | over
+  let bands, speed, score, combo, player, mismatch, t = 0, overAt = 0;
+  let shake, flash, scorePulse, burst, newBest;
+  let particles, rings, popups;
+
+  function difficulty() {
+    const k = clamp01(score / 120);
+    return {
+      minD: lerp(0.85, 0.3, k),   // shortest band, in seconds of travel
+      maxD: lerp(1.5, 0.7, k),    // longest band
+      speed: H * lerp(0.55, 1.35, clamp01(score / 160)),
+    };
+  }
+
+  function reset(startSpeed) {
+    speed = startSpeed; score = 0; combo = 0; mismatch = 0; burst = 0;
+    shake = 0; scorePulse = 0;
+    particles = []; rings = []; popups = [];
+    player = { c: 1, squash: 0, alive: true };
+    // the first band sits under the player and gives ~1.4s before the first edge
+    const top = PY - speed * 1.4;
+    bands = [{ y: top, h: H - top + 40, c: 0, entered: true }];
+    fill();
+  }
+
+  function fill() {
+    let top = bands[bands.length - 1];
+    while (top.y > -H * 0.25) {
+      const d = difficulty();
+      let dur;
+      if (burst > 0) {
+        burst--;
+        dur = Math.max(0.24, d.minD * 0.75);
+      } else {
+        dur = d.minD + Math.random() * (d.maxD - d.minD);
+        if (state === 'play' && score > 12 && Math.random() < 0.12) burst = 2 + ((Math.random() * 3) | 0);
+      }
+      const h = dur * speed;
+      const b = { y: top.y - h, h, c: 1 - top.c, entered: false };
+      bands.push(b);
+      top = b;
+    }
+  }
+
+  function colorAt(y) {
+    for (const b of bands) if (y >= b.y && y < b.y + b.h) return b.c;
+    return 0;
+  }
+
+  function start() {
+    reset(H * 0.55);
+    state = 'play';
+    newBest = false;
+    flash = 1;
+    beep(660, 0.08, 'triangle');
+  }
+
+  function die() {
+    state = 'over';
+    overAt = t;
+    player.alive = false;
+    shake = 1;
+    buzz([30, 40, 90]);
+    crash();
+    for (let i = 0; i < 36; i++) {
+      const a = Math.random() * Math.PI * 2, v = 120 + Math.random() * 380;
+      particles.push({ x: W / 2, y: PY, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, s: 2 + Math.random() * 5, k: i % 3 });
+    }
+    if (score > best) { best = score; store.set('contrast.best', best); newBest = true; }
+  }
+
+  function onCross() {
+    score += 1;
+    scorePulse = 1;
+  }
+
+  function flip() {
+    player.c = 1 - player.c;
+    player.squash = 1;
+
+    // nearest edge to the player line
+    let near = null, nd = Infinity;
+    for (const b of bands) {
+      const d = Math.abs(b.y + b.h - PY);
+      if (d < nd) { nd = d; near = b; }
+    }
+    const correct = near && player.c !== near.c;
+    if (correct && nd / speed <= PERFECT) {
+      combo++;
+      const bonus = Math.min(combo, 5);
+      score += bonus;
+      scorePulse = 1;
+      rings.push({ r: R, life: 1 });
+      popups.push({ text: combo > 1 ? 'PERFECT x' + combo : 'PERFECT', sub: '+' + bonus, y: PY - R * 2.2, life: 1 });
+      beep(880 + Math.min(combo, 8) * 110, 0.09, 'triangle', 0.06);
+      buzz(12);
+    } else {
+      combo = 0;
+      beep(player.c ? 520 : 390, 0.05, 'square', 0.035);
+      buzz(6);
+    }
+  }
+
+  function press() {
+    audio();
+    if (state === 'menu') { start(); return; }
+    if (state === 'over') { if (t - overAt > 0.5) start(); return; }
+    flip();
+  }
+
+  cvs.addEventListener('pointerdown', (e) => { e.preventDefault(); press(); });
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'Enter') { e.preventDefault(); press(); }
+  });
+
+  // ---------- update ----------
+  function update(dt) {
+    t += dt;
+    if (state === 'play') speed += (difficulty().speed - speed) * Math.min(1, dt * 0.8);
+    else if (state === 'over') speed *= Math.pow(0.04, dt);
+
+    const dy = speed * dt;
+    for (const b of bands) {
+      b.y += dy;
+      if (!b.entered && b.y + b.h >= PY) {
+        b.entered = true;
+        if (state === 'play') onCross();
+      }
+    }
+    while (bands.length > 1 && bands[0].y > H) bands.shift();
+    fill();
+
+    if (state === 'menu') player.c = 1 - colorAt(PY); // attract mode plays itself
+    if (state === 'play') {
+      if (player.c === colorAt(PY)) {
+        mismatch += dt;
+        if (mismatch > GRACE) die();
+      } else mismatch = 0;
+    }
+
+    player.squash = Math.max(0, player.squash - dt * 6);
+    scorePulse = Math.max(0, scorePulse - dt * 4);
+    shake = Math.max(0, shake - dt * 2.5);
+    flash = Math.max(0, (flash || 0) - dt * 3);
+    for (const p of particles) {
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 600 * dt; p.vx *= 0.99; p.life -= dt * 0.9;
+    }
+    particles = particles.filter((p) => p.life > 0);
+    for (const r of rings) { r.r += dt * R * 9; r.life -= dt * 2.2; }
+    rings = rings.filter((r) => r.life > 0);
+    for (const p of popups) { p.y -= dt * 60; p.life -= dt * 1.4; }
+    popups = popups.filter((p) => p.life > 0);
+  }
+
+  // ---------- render ----------
+  function text(str, x, y, size, weight = 900, align = 'center') {
+    ctx.font = weight + ' ' + size + 'px ' + FONT;
+    ctx.textAlign = align;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(str, x, y);
+  }
+
+  function pill(str, x, y, size) {
+    ctx.font = '900 ' + size + 'px ' + FONT;
+    const w = ctx.measureText(str).width + size * 1.4, h = size * 1.7;
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x - w / 2, y - h / 2, w, h, h / 2);
+    else ctx.rect(x - w / 2, y - h / 2, w, h);
+    ctx.fill();
+    ctx.fillStyle = ACCENT;
+    text(str, x, y + 1, size);
+  }
+
+  function render() {
+    ctx.save();
+    if (shake > 0) {
+      const s = shake * shake * 16;
+      ctx.translate((Math.random() - 0.5) * s, (Math.random() - 0.5) * s);
+    }
+
+    // world: pure black and white bands
+    ctx.fillStyle = '#000';
+    ctx.fillRect(-20, -20, W + 40, H + 40);
+    ctx.fillStyle = '#fff';
+    for (const b of bands) if (b.c === 1) ctx.fillRect(-20, Math.floor(b.y), W + 40, Math.ceil(b.h) + 1);
+
+    // player line markers (inverted so they always read)
+    ctx.globalCompositeOperation = 'difference';
+    ctx.fillStyle = '#fff';
+    const m = R * 0.7;
+    ctx.beginPath(); ctx.moveTo(0, PY - m * 0.6); ctx.lineTo(m, PY); ctx.lineTo(0, PY + m * 0.6); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(W, PY - m * 0.6); ctx.lineTo(W - m, PY); ctx.lineTo(W, PY + m * 0.6); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+
+    // perfect rings
+    for (const r of rings) {
+      ctx.strokeStyle = ACCENT;
+      ctx.globalAlpha = r.life;
+      ctx.lineWidth = 4 * r.life + 1;
+      ctx.beginPath(); ctx.arc(W / 2, PY, r.r, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // player
+    if (player.alive) {
+      const sq = player.squash;
+      ctx.save();
+      ctx.translate(W / 2, PY);
+      ctx.scale(1 + sq * 0.35, 1 - sq * 0.25);
+      ctx.fillStyle = player.c ? '#fff' : '#000';
+      ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      // warning: you are blending in
+      if (state === 'play' && mismatch > 0) {
+        ctx.strokeStyle = ACCENT;
+        ctx.lineWidth = 3;
+        ctx.setLineDash([6, 6]);
+        ctx.beginPath(); ctx.arc(W / 2, PY, R + 4, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    // shatter
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      if (p.k === 0) ctx.fillStyle = ACCENT;
+      else { ctx.globalCompositeOperation = 'difference'; ctx.fillStyle = '#fff'; }
+      ctx.fillRect(p.x - p.s / 2, p.y - p.s / 2, p.s, p.s);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // HUD: drawn with "difference" so it inverts against whatever band is behind it
+    ctx.globalCompositeOperation = 'difference';
+    ctx.fillStyle = '#fff';
+    const cx = W / 2, unit = Math.min(W, H);
+
+    if (state === 'play') {
+      text(String(score), cx, H * 0.14, unit * 0.16 * (1 + scorePulse * 0.15));
+      for (const p of popups) {
+        ctx.globalAlpha = clamp01(p.life * 1.5);
+        text(p.text, cx, p.y, unit * 0.05);
+        text(p.sub, cx, p.y + unit * 0.06, unit * 0.04, 700);
+      }
+      ctx.globalAlpha = 1;
+    } else if (state === 'menu') {
+      text('CONTRAST', cx, H * 0.24, Math.min(W * 0.15, 110));
+      text('STAY SEEN.', cx, H * 0.24 + Math.min(W * 0.11, 80), unit * 0.045, 700);
+      text('Tap to flip black ↔ white.', cx, H * 0.44, unit * 0.04, 500);
+      text('Never match the ground.', cx, H * 0.44 + unit * 0.06, unit * 0.04, 500);
+      ctx.globalAlpha = 0.55 + 0.45 * Math.sin(t * 4);
+      text('TAP TO PLAY', cx, H * 0.88, unit * 0.055);
+      ctx.globalAlpha = 1;
+      if (best > 0) text('BEST ' + best, cx, H * 0.95, unit * 0.035, 700);
+    } else {
+      text('YOU BLENDED IN', cx, H * 0.2, unit * 0.07);
+      text(String(score), cx, H * 0.34, unit * 0.22);
+      text('BEST ' + best, cx, H * 0.46, unit * 0.045, 700);
+      if (t - overAt > 0.5) {
+        ctx.globalAlpha = 0.55 + 0.45 * Math.sin((t - overAt) * 4);
+        text('TAP TO RETRY', cx, H * 0.9, unit * 0.055);
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    if (state === 'over' && newBest) pill('NEW BEST', cx, H * 0.53, unit * 0.04);
+
+    if (flash > 0) {
+      ctx.globalCompositeOperation = 'difference';
+      ctx.globalAlpha = flash;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  }
+
+  // ---------- loop ----------
+  reset(H * 0.35);
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
