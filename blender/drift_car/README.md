@@ -5,9 +5,13 @@ Python script (`drift_car.py`), with no downloaded models, textures or HDRIs.
 
 ![Hero render](render_hero.png)
 
-| Rear | Wheel detail |
+| Cockpit | Seats |
 |---|---|
-| ![Rear](render_rear.png) | ![Wheel](render_wheel.png) |
+| ![Cockpit](render_cockpit.png) | ![Seats](render_seat.png) |
+
+| Through the window | Rear | Wheel detail |
+|---|---|---|
+| ![Door](render_door.png) | ![Rear](render_rear.png) | ![Wheel](render_wheel.png) |
 
 ## Open it
 
@@ -21,7 +25,9 @@ Python script (`drift_car.py`), with no downloaded models, textures or HDRIs.
   blender -b -P drift_car.py -- --save drift_car.blend                    # just build + save
   blender -b -P drift_car.py -- --render quick.png --samples 64 --percent 50 --no-smoke
   ```
-  Cameras: `hero`, `rear`, `side`, `top`, `wheel`. Add `--gpu` to render on a GPU.
+  Cameras: `hero`, `rear`, `side`, `top`, `wheel`, and the interior cameras
+  `cockpit`, `seat`, `door`. Interior cameras raise the exposure and turn the
+  smoke off automatically. Add `--gpu` to render on a GPU.
 
 ## What's modelled
 
@@ -49,12 +55,36 @@ Python script (`drift_car.py`), with no downloaded models, textures or HDRIs.
 - Directional tyre tread done in the shader, with sidewall ribs and a worn
   look.
 - Slotted brake discs with heat discolouration, big front and smaller rear
-  calipers, camber and counter-steer.
+  calipers with **brembo** logos, camber and counter-steer.
+- Raised white **FALKEN AZENIS RT615K+** sidewall lettering, plus the size
+  (225/40R18).
 
-**Interior**
-- A roll cage, two bucket seats with harnesses, a deep-dish suede steering
-  wheel, a hydraulic handbrake, a shifter and a dash. You can see all of them
-  through the tinted glass.
+**Interior** (right-hand drive; the front windows are wound down so you can see in)
+- **BRIDE-style bucket seats:** lofted shells with thigh, side and shoulder
+  bolsters and harness slots, in black gradation fabric with red dots that
+  fade out up the seat. The brand is embroidered on the headrest and the back
+  of the shell. Aluminium side mounts, rails and bolts.
+- **TAKATA 6-point harnesses:** shoulder straps run from the harness bar
+  through the shoulder slots, plus lap and anti-sub straps, padded shoulder
+  pads, adjusters and a cam-lock buckle.
+- **MOMO deep-dish wheel:** Alcantara rim with a red 12 o'clock marker and
+  stitching, dished spokes, a horn button with the logo and a quick-release
+  hub.
+- **Instruments:** a leather dash with a suede binnacle. The tacho has 0–9
+  numerals and a red line, the speedo reads 0–240, and there are fuel and
+  temperature gauges. Each has chrome bezels, glass, backlit faces and
+  needles. A triple Defi pod (boost, oil, water) sits on the dash top.
+- **Centre stack:** air vents with slats, a carbon switch panel with labelled
+  toggles (IGN, FUEL, FAN, WIPER, LIGHT, START), climate knobs and a red kill
+  switch.
+- **Pedal box:** clutch, brake and throttle with grip strips, plus a dead
+  pedal.
+- **Floor and controls:** a leather shifter boot, a hydraulic handbrake with
+  its reservoir, a fire extinguisher with straps, carpet, rubber mats and a
+  transmission tunnel.
+- **Cabin trim:** carbon door cards with pull straps, a wide panoramic mirror,
+  a rear seat-delete panel, and window seals and door tops.
+- **Roll cage:** padded door bars and halo, a harness bar and base plates.
 
 **Materials**
 - Multi-layer paint: metallic flakes, clear coat with orange peel, and a
@@ -83,8 +113,14 @@ Edit the `CONFIG` block at the top of `drift_car.py`:
 | `steer_deg`, `drift_deg`, `turn_radius`, `roll_deg` | drift pose |
 | `front_camber`, `rear_camber` | wheel camber |
 | `smoke` | tyre smoke on or off (smoke roughly doubles render time) |
+| `windows_down` | front side windows down (open) or up (glass) |
+| `brands` | brand names on the seats, steering wheel, harness, tyres, calipers, gauges and sponsor decals |
+
+The brands are plain-text wordmarks in Blender's built-in font, not the
+official logo artwork. To use real logos, swap in the image files.
 
 ## Render times
 
-The included renders took about 25 minutes (hero, 1920×1080, 128 samples) on a
-4-core CPU, with denoising on. A GPU is many times faster.
+The included renders were made on a 4-core CPU with denoising on. The hero shot
+(1920×1080, 128 samples) took about 25 minutes, and each interior shot
+(1600×900, 96 samples) took about 10. A GPU is many times faster.

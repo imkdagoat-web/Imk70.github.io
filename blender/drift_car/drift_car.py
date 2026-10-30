@@ -26,7 +26,7 @@ Options (after the "--"):
     --res WxH            resolution (default 1920x1080)
     --percent P          resolution percentage (default 100)
     --no-smoke           skip the tyre smoke volume (much faster renders)
-    --cam NAME           which camera to render: hero, side, rear, top
+    --cam NAME           camera: hero, side, rear, top, wheel, cockpit, door, seat
     --gpu                try to render on the GPU
 
 Everything you might want to tweak (paint colour, wheel colour, steering
@@ -63,7 +63,19 @@ CONFIG = {
     "front_camber": 3.5,                   # degrees negative camber
     "rear_camber": 1.0,
     "smoke": True,
+    "windows_down": True,                  # front side windows wound down (shows the cockpit)
     "seed": 70,
+    # real aftermarket brands used on parts and decals (plain-text wordmarks)
+    "brands": {
+        "seat": "BRIDE",
+        "steering": "MOMO",
+        "harness": "TAKATA",
+        "tyre": "FALKEN",
+        "tyre_model": "AZENIS RT615K+",
+        "caliper": "brembo",
+        "gauges": "Defi",
+        "sponsors": ["FALKEN", "BRIDE", "TAKATA"],
+    },
 }
 
 # Car dimensions (metres). x = forward, y = left, z = up.
@@ -858,9 +870,6 @@ def build_materials():
     M["led_red"] = mat_emission("LED Red", (1.0, 0.03, 0.01), 14.0)
     M["led_amber"] = mat_emission("LED Amber", (1.0, 0.45, 0.02), 4.0)
     M["intercooler"] = mat_simple("Intercooler", (0.55, 0.55, 0.57), rough=0.35, metal=1.0)
-    M["fabric"] = mat_simple("Seat Fabric", (0.02, 0.02, 0.022), rough=0.95, sheen=0.6)
-    M["fabric_red"] = mat_simple("Seat Fabric Red", (0.35, 0.01, 0.01), rough=0.95, sheen=0.6)
-    M["suede"] = mat_simple("Alcantara", (0.025, 0.025, 0.025), rough=1.0, sheen=1.0)
     M["cage"] = mat_simple("Cage Paint", C["cage"], rough=0.38, coat=0.3)
     M["harness"] = mat_simple("Harness", (0.45, 0.02, 0.02), rough=0.8, sheen=0.5)
     M["dash"] = mat_simple("Dash Plastic", (0.02, 0.02, 0.021), rough=0.7)
@@ -882,6 +891,8 @@ def build_materials():
     M["smoke"] = mat_smoke("Tyre Smoke")
     M["tyre_wall"] = mat_simple("Old Tyres", (0.02, 0.02, 0.02), rough=0.8)
     M["paint_line"] = mat_simple("Line Paint", (0.70, 0.70, 0.66), rough=0.6)
+    M["tyre_letter"] = mat_simple("Tyre Lettering", (0.75, 0.75, 0.73), rough=0.7)
+    build_interior_materials(M)
     return M
 
 
@@ -1046,7 +1057,7 @@ def patch_grid(bvh, corners, direction, nu=14, nv=8, back=2.0):
         for i in range(nu + 1):
             u = i / nu
             p = (A * (1 - u) + B * u) * (1 - v) + (D * (1 - u) + Cc * u) * v
-            loc, nor = ray(bvh, p - d * back, d, back * 3)
+            loc, nor = ray(bvh, p - d * back, d, max(back * 3, 3.0))
             row.append((loc, nor, p))
         grid.append(row)
     # fill misses from neighbours
@@ -1238,12 +1249,50 @@ def build_wheel(tag, coll, M, center, side, steer, camber, front):
     cal = lathe(f"Caliper_{tag}", prof, coll, [M["caliper"]], segs=18, a0=mid - span / 2, a1=mid + span / 2)
     add_subsurf(cal, 1, 2)
     parts.append(cal)
+    # caliper logo, following the arc as seen from outside the car
+    phi = math.pi - mid
+    r = 0.158
+    loc = Vector((r * math.cos(mid), 0.0092, r * math.sin(mid)))
+    xa = Vector((-math.sin(phi), 0, -math.cos(phi)))
+    parts.append(place_text(f"CaliperLogo_{tag}", CONFIG["brands"]["caliper"], 0.024 if big else 0.019, coll,
+                            M["vinyl_white"], basis_matrix(xa, (0, 1, 0), loc), 0.0004))
     # upright / hub carrier hint
     upr = make_box(f"Upright_{tag}", (0, -0.075, 0), (0.12, 0.05, 0.22), coll, [M["anodized"]], bevel=0.008)
     parts.append(upr)
     for p in parts:
         p.parent = root
+    # raised white sidewall lettering
+    B = CONFIG["brands"]
+    for k, (txt, deg, size) in enumerate(((B["tyre"], 90, 0.030), (B["tyre_model"], 0, 0.016),
+                                          (B["tyre"], 270, 0.030), ("225/40R18 92W", 180, 0.014))):
+        parts += arc_text(f"TyreText_{tag}_{k}", txt, 0.274, deg, size, coll, M["tyre_letter"], root)
     return root, parts
+
+
+def arc_text(name, body, radius, centre_deg, size, coll, mat, parent):
+    """Text bent around the tyre sidewall (outer face = local +Y), reading clockwise, tops outward."""
+    length = len(body) * size * 0.68
+    span = min(length / radius * 1.15, math.radians(170))
+    # the sidewall plane is the curve's XY plane turned 180 degrees as seen from outside
+    c = math.radians(centre_deg + 180)
+    cu = bpy.data.curves.new(name + "_Path", "CURVE")
+    cu.dimensions = "3D"
+    sp = cu.splines.new("POLY")
+    n = 48
+    sp.points.add(n - 1)
+    for i, pt in enumerate(sp.points):
+        a = c + span / 2 - span * i / (n - 1)
+        pt.co = (radius * math.cos(a), radius * math.sin(a), 0.0, 1.0)
+    path = bpy.data.objects.new(name + "_Path", cu)
+    coll.objects.link(path)
+    path.parent = parent
+    path.matrix_basis = Matrix.Translation((0, 0.1222, 0)) @ Matrix.Rotation(math.radians(-90), 4, "X")
+    t = text_object(name, body, size, coll, mat, 0.0007)
+    t.data.align_x = "CENTER"
+    t.data.offset_x = radius * span / 2
+    t.data.follow_curve = path
+    t.parent = path
+    return [path, t]
 
 
 # ---------------------------------------------------------------------------
@@ -1410,76 +1459,884 @@ def build_wing(bvh, coll, M):
     return objs
 
 
-def build_interior(bvh, coll, M):
+DRIVER_Y = -0.37          # right-hand drive
+SEAT_BASE_X = -0.15
+SEAT_BASE_Z = 0.22
+
+
+def torus_bm(bm, R, r, segs=64, rsegs=14, matrix=None, mat_index=0):
+    rings = []
+    for i in range(segs):
+        a = 2 * math.pi * i / segs
+        ca, sa = math.cos(a), math.sin(a)
+        ring = []
+        for j in range(rsegs):
+            b = 2 * math.pi * j / rsegs
+            p = Vector(((R + r * math.cos(b)) * ca, (R + r * math.cos(b)) * sa, r * math.sin(b)))
+            ring.append(bm.verts.new(matrix @ p if matrix is not None else p))
+        rings.append(ring)
+    for i in range(segs):
+        r0, r1 = rings[i], rings[(i + 1) % segs]
+        for j in range(rsegs):
+            j1 = (j + 1) % rsegs
+            bm.faces.new((r0[j], r1[j], r1[j1], r0[j1])).material_index = mat_index
+
+
+def box_between(bm, p0, p1, width, thick, up, mat_index=0):
+    p0, p1 = Vector(p0), Vector(p1)
+    axis = p1 - p0
+    side = Vector(up).cross(axis).normalized()
+    m = basis_matrix(side, axis, (p0 + p1) / 2)
+    # basis_matrix puts `axis` on Z and `side` on X
+    box_bm(bm, (0, 0, 0), (width, thick, axis.length), matrix=None, mat_index=mat_index)
+    for v in bm.verts[-8:]:
+        v.co = m @ v.co
+
+
+def ribbon(name, pts, ups, width, coll, mat, thick=0.003):
+    bm = bmesh.new()
+    rows = []
+    n = len(pts)
+    for i, p in enumerate(pts):
+        t = (pts[min(i + 1, n - 1)] - pts[max(i - 1, 0)]).normalized()
+        side = t.cross(ups[i]).normalized() * (width / 2)
+        rows.append((bm.verts.new(p - side), bm.verts.new(p + side)))
+    for i in range(n - 1):
+        bm.faces.new((rows[i][0], rows[i][1], rows[i + 1][1], rows[i + 1][0]))
+    ob = bm_to_object(bm, name, coll, [mat])
+    so = ob.modifiers.new("Solidify", "SOLIDIFY")
+    so.thickness = thick
+    return ob
+
+
+def smooth_path(ctrl, n=24):
+    ctrl = [Vector(c) for c in ctrl]
+    out = []
+    k = len(ctrl)
+    for i in range(k - 1):
+        p0, p1, p2, p3 = ctrl[max(i - 1, 0)], ctrl[i], ctrl[i + 1], ctrl[min(i + 2, k - 1)]
+        steps = max(2, n // (k - 1))
+        for s in range(steps):
+            t = s / steps
+            out.append(Vector([catmull(p0[j], p1[j], p2[j], p3[j], t) for j in range(3)]))
+    out.append(ctrl[-1])
+    return out
+
+
+def place_text(name, body, size, coll, mat, matrix, extrude=0.0004, bold=True):
+    t = text_object(name, body, size, coll, mat, extrude)
+    t.matrix_world = matrix
+    return t
+
+
+def facing_frame(center, normal):
+    """Frame whose +Z is `normal` and +Y is as close to world up as possible.
+    A viewer looking at it along -normal sees +X on their right."""
+    n = Vector(normal).normalized()
+    up = Vector((0, 0, 1))
+    up = (up - n * up.dot(n))
+    if up.length < 1e-4:
+        up = Vector((1, 0, 0))
+    up.normalize()
+    x = up.cross(n)
+    return basis_matrix(x, n, center)
+
+
+# ---------------------------------------------------------------------------
+# interior materials
+# ---------------------------------------------------------------------------
+
+
+def mat_leather(name, col, rough=0.45, grain=900.0):
+    m, nt, out = new_mat(name)
+    oc = obj_coords(nt)
+    vo = node(nt, "ShaderNodeTexVoronoi", Scale=grain)
+    L(nt, oc, vo.inputs["Vector"])
+    nz = node(nt, "ShaderNodeTexNoise", Scale=grain / 6, Detail=4.0)
+    L(nt, oc, nz.inputs["Vector"])
+    p = principled(nt, base=col, rough=rough, coat=0.15, coat_rough=0.4)
+    rr = ramp(nt, [(0.3, (rough - 0.08,) * 3), (0.7, (rough + 0.12,) * 3)])
+    L(nt, nz.outputs["Fac"], rr.inputs["Fac"])
+    L(nt, rr.outputs["Color"], p.inputs["Roughness"])
+    L(nt, bump(nt, vo.outputs["Distance"], 0.35, 0.0015), p.inputs["Normal"])
+    finish(nt, out, p.outputs[0])
+    m.diffuse_color = rgba(col)
+    return m
+
+
+def mat_suede(name, col):
+    m, nt, out = new_mat(name)
+    oc = obj_coords(nt)
+    nz = node(nt, "ShaderNodeTexNoise", Scale=2500.0, Detail=2.0)
+    L(nt, oc, nz.inputs["Vector"])
+    blot = node(nt, "ShaderNodeTexNoise", Scale=40.0, Detail=6.0)
+    L(nt, oc, blot.inputs["Vector"])
+    c = ramp(nt, [(0.3, tuple(v * 0.8 for v in col)), (0.7, tuple(v * 1.35 for v in col))])
+    L(nt, blot.outputs["Fac"], c.inputs["Fac"])
+    p = principled(nt, rough=1.0, sheen=1.0, sheen_rough=0.35, spec=0.2)
+    L(nt, c.outputs["Color"], p.inputs["Base Color"])
+    L(nt, bump(nt, nz.outputs["Fac"], 0.3, 0.0008), p.inputs["Normal"])
+    finish(nt, out, p.outputs[0])
+    m.diffuse_color = rgba(col)
+    return m
+
+
+def mat_wheel_suede(name, col, marker=(0.75, 0.02, 0.02)):
+    """Steering-wheel Alcantara with a red 12 o'clock marker and stitching."""
+    m, nt, out = new_mat(name)
+    oc = obj_coords(nt)
+    sx = nt.nodes.new("ShaderNodeSeparateXYZ")
+    L(nt, oc, sx.inputs[0])
+    ang = math_node(nt, "ARCTAN2", sx.outputs[1], sx.outputs[0])
+    d = math_node(nt, "ABSOLUTE", math_node(nt, "SUBTRACT", ang, math.pi / 2))
+    mk = math_node(nt, "LESS_THAN", d, 0.07)
+    # stitching runs around the inside of the rim
+    rad = math_node(nt, "SQRT",
+                    math_node(nt, "ADD", math_node(nt, "MULTIPLY", sx.outputs[0], sx.outputs[0]),
+                              math_node(nt, "MULTIPLY", sx.outputs[1], sx.outputs[1])))
+    seam = math_node(nt, "MULTIPLY", math_node(nt, "LESS_THAN", rad, 0.1605),
+                     math_node(nt, "GREATER_THAN", rad, 0.1585))
+    dash = math_node(nt, "GREATER_THAN", math_node(nt, "SINE", math_node(nt, "MULTIPLY", ang, 260.0)), 0.0)
+    stitch = math_node(nt, "MULTIPLY", seam, dash)
+    nz = node(nt, "ShaderNodeTexNoise", Scale=2500.0, Detail=2.0)
+    L(nt, oc, nz.inputs["Vector"])
+    c1 = nt.nodes.new("ShaderNodeMix")
+    c1.data_type = "RGBA"
+    L(nt, mk, c1.inputs[0])
+    c1.inputs[6].default_value = rgba(col)
+    c1.inputs[7].default_value = rgba(marker)
+    c2 = nt.nodes.new("ShaderNodeMix")
+    c2.data_type = "RGBA"
+    L(nt, stitch, c2.inputs[0])
+    L(nt, c1.outputs[2], c2.inputs[6])
+    c2.inputs[7].default_value = rgba(marker)
+    p = principled(nt, rough=1.0, sheen=1.0, sheen_rough=0.35, spec=0.2)
+    L(nt, c2.outputs[2], p.inputs["Base Color"])
+    L(nt, bump(nt, nz.outputs["Fac"], 0.3, 0.0008), p.inputs["Normal"])
+    finish(nt, out, p.outputs[0])
+    return m
+
+
+def mat_gradation(name, accent=(0.45, 0.01, 0.012)):
+    """Racing-seat fabric: black weave with a dot 'gradation' fading up the seat."""
+    m, nt, out = new_mat(name)
+    oc = obj_coords(nt)
+    sx = nt.nodes.new("ShaderNodeSeparateXYZ")
+    L(nt, oc, sx.inputs[0])
+    vo = node(nt, "ShaderNodeTexVoronoi", Scale=110.0)
+    try:
+        vo.inputs["Randomness"].default_value = 0.0
+    except KeyError:
+        pass
+    L(nt, oc, vo.inputs["Vector"])
+    # dot radius shrinks with height (object z)
+    rmax = math_node(nt, "MULTIPLY_ADD", sx.outputs[2], -0.55)
+    rmax.node.inputs[2].default_value = 0.42
+    dots = math_node(nt, "LESS_THAN", vo.outputs["Distance"], math_node(nt, "MAXIMUM", rmax, 0.0))
+    wv1 = node(nt, "ShaderNodeTexWave", Scale=900.0)
+    wv2 = node(nt, "ShaderNodeTexWave", Scale=900.0)
+    wv2.bands_direction = "Y"
+    for w in (wv1, wv2):
+        L(nt, oc, w.inputs["Vector"])
+    weave = math_node(nt, "MULTIPLY", wv1.outputs["Fac"], wv2.outputs["Fac"])
+    c = nt.nodes.new("ShaderNodeMix")
+    c.data_type = "RGBA"
+    L(nt, dots, c.inputs[0])
+    c.inputs[6].default_value = (0.012, 0.012, 0.013, 1)
+    c.inputs[7].default_value = rgba(accent)
+    p = principled(nt, rough=0.95, sheen=0.8, sheen_rough=0.4, spec=0.25)
+    L(nt, c.outputs[2], p.inputs["Base Color"])
+    L(nt, bump(nt, weave, 0.35, 0.001), p.inputs["Normal"])
+    finish(nt, out, p.outputs[0])
+    m.diffuse_color = (0.02, 0.02, 0.02, 1)
+    return m
+
+
+def mat_carpet(name, col=(0.018, 0.018, 0.02)):
+    m, nt, out = new_mat(name)
+    oc = obj_coords(nt)
+    nz = node(nt, "ShaderNodeTexNoise", Scale=3000.0, Detail=2.0)
+    big = node(nt, "ShaderNodeTexNoise", Scale=8.0, Detail=4.0)
+    L(nt, oc, nz.inputs["Vector"])
+    L(nt, oc, big.inputs["Vector"])
+    c = ramp(nt, [(0.3, col), (0.75, tuple(v * 2.2 for v in col))])
+    L(nt, big.outputs["Fac"], c.inputs["Fac"])
+    p = principled(nt, rough=1.0, sheen=1.0, sheen_rough=0.5, spec=0.1)
+    L(nt, c.outputs["Color"], p.inputs["Base Color"])
+    L(nt, bump(nt, nz.outputs["Fac"], 0.6, 0.002), p.inputs["Normal"])
+    finish(nt, out, p.outputs[0])
+    return m
+
+
+def mat_gauge(name, majors, red_from=None, sweep=270.0, face=(0.008, 0.008, 0.009)):
+    """Gauge face drawn in the shader: tick marks, minor ticks, red zone, backlight."""
+    m, nt, out = new_mat(name)
+    sx = nt.nodes.new("ShaderNodeSeparateXYZ")
+    L(nt, obj_coords(nt), sx.inputs[0])
+    x, y = sx.outputs[0], sx.outputs[1]
+    rn = math_node(nt, "SQRT", math_node(nt, "ADD", math_node(nt, "MULTIPLY", x, x), math_node(nt, "MULTIPLY", y, y)))
+    ang = math_node(nt, "ARCTAN2", y, x)
+    sw = math.radians(sweep)
+    a0 = math.radians(90 + sweep / 2)
+    t = math_node(nt, "DIVIDE", math_node(nt, "FLOORED_MODULO", math_node(nt, "SUBTRACT", a0, ang), 2 * math.pi), sw)
+    inr = math_node(nt, "LESS_THAN", t, 1.004)
+
+    def ticks(count, half_width, r0, r1):
+        xx = math_node(nt, "MULTIPLY", t, float(count))
+        d = math_node(nt, "ABSOLUTE", math_node(nt, "SUBTRACT", math_node(nt, "FRACT", math_node(nt, "ADD", xx, 0.5)), 0.5))
+        arc = math_node(nt, "MULTIPLY", math_node(nt, "MULTIPLY", d, sw / count), rn)
+        tk = math_node(nt, "LESS_THAN", arc, half_width)
+        band = math_node(nt, "MULTIPLY", math_node(nt, "GREATER_THAN", rn, r0), math_node(nt, "LESS_THAN", rn, r1))
+        return math_node(nt, "MULTIPLY", tk, band)
+
+    tick = math_node(nt, "MAXIMUM", ticks(majors, 0.016, 0.70, 0.93), ticks(majors * 5, 0.006, 0.82, 0.93))
+    tick = math_node(nt, "MULTIPLY", tick, inr)
+    ring = math_node(nt, "MULTIPLY", math_node(nt, "GREATER_THAN", rn, 0.93), math_node(nt, "LESS_THAN", rn, 0.945))
+    tick = math_node(nt, "MAXIMUM", tick, math_node(nt, "MULTIPLY", ring, inr))
+    c = nt.nodes.new("ShaderNodeMix")
+    c.data_type = "RGBA"
+    L(nt, tick, c.inputs[0])
+    c.inputs[6].default_value = rgba(face)
+    c.inputs[7].default_value = (0.92, 0.92, 0.90, 1)
+    col = c.outputs[2]
+    if red_from is not None:
+        red = math_node(nt, "MULTIPLY", math_node(nt, "GREATER_THAN", t, red_from), inr)
+        red = math_node(nt, "MULTIPLY", red, math_node(nt, "MULTIPLY", math_node(nt, "GREATER_THAN", rn, 0.80),
+                                                        math_node(nt, "LESS_THAN", rn, 0.93)))
+        c2 = nt.nodes.new("ShaderNodeMix")
+        c2.data_type = "RGBA"
+        L(nt, red, c2.inputs[0])
+        L(nt, col, c2.inputs[6])
+        c2.inputs[7].default_value = (0.9, 0.03, 0.02, 1)
+        col = c2.outputs[2]
+    p = principled(nt, rough=0.35, emit_str=0.6)
+    L(nt, col, p.inputs["Base Color"])
+    L(nt, col, p.inputs["Emission Color"])
+    finish(nt, out, p.outputs[0])
+    return m
+
+
+def build_interior_materials(M):
+    M["dash_leather"] = mat_leather("Dash Leather", (0.016, 0.016, 0.017), 0.5, 700.0)
+    M["leather_red"] = mat_leather("Red Leather", (0.30, 0.012, 0.012), 0.42, 1100.0)
+    M["leather_black"] = mat_leather("Black Leather", (0.014, 0.014, 0.015), 0.4, 1100.0)
+    M["suede"] = mat_suede("Alcantara", (0.022, 0.022, 0.023))
+    M["wheel_suede"] = mat_wheel_suede("Steering Alcantara", (0.022, 0.022, 0.023))
+    M["gradation"] = mat_gradation("Seat Gradation Fabric")
+    M["frp"] = mat_simple("Seat FRP Shell", (0.010, 0.010, 0.011), rough=0.6, spec=0.25)
+    M["carpet"] = mat_carpet("Carpet")
+    M["rubber_mat"] = mat_leather("Rubber Floor Mat", (0.02, 0.02, 0.021), 0.75, 250.0)
+    M["foam"] = mat_simple("Cage Padding", (0.012, 0.012, 0.013), rough=0.9)
+    M["extinguisher"] = mat_simple("Extinguisher Red", (0.55, 0.01, 0.01), rough=0.25, coat=1.0)
+    M["needle"] = mat_emission("Gauge Needle", (1.0, 0.25, 0.02), 3.0)
+    M["gauge_tach"] = mat_gauge("Gauge Tacho", 9, red_from=7.5 / 9)
+    M["gauge_speed"] = mat_gauge("Gauge Speedo", 12)
+    M["gauge_small"] = mat_gauge("Gauge Small", 4, sweep=120.0)
+    M["gauge_defi"] = mat_gauge("Gauge Defi", 6, red_from=0.85, face=(0.01, 0.012, 0.02))
+    M["switch_red"] = mat_simple("Switch Red", (0.6, 0.01, 0.01), rough=0.3, coat=0.5)
+    M["label"] = mat_emission("Label White", (0.9, 0.9, 0.88), 0.4)
+    M["mirror_glass"] = mat_simple("Mirror", (0.9, 0.9, 0.9), rough=0.0, metal=1.0)
+    M["rubber_seal"] = mat_simple("Rubber Seal", (0.01, 0.01, 0.011), rough=0.55)
+
+
+# ---------------------------------------------------------------------------
+# racing bucket seat (FRP shell, lofted)
+# ---------------------------------------------------------------------------
+
+
+def seat_path():
+    """Centre line of a bucket seat in seat-local (x forward, z up), arc-length sampled."""
+    ctrl = [Vector((0.25, 0.0, 0.11)), Vector((0.05, 0.0, 0.05)), Vector((-0.12, 0.0, 0.025)),
+            Vector((-0.20, 0.0, 0.10)), Vector((-0.25, 0.0, 0.40)), Vector((-0.305, 0.0, 0.70)),
+            Vector((-0.33, 0.0, 0.84))]
+    pts = smooth_path(ctrl, 60)
+    # arc length param
+    acc = [0.0]
+    for i in range(1, len(pts)):
+        acc.append(acc[-1] + (pts[i] - pts[i - 1]).length)
+    total = acc[-1]
+    res = []
+    for i, p in enumerate(pts):
+        t = (pts[min(i + 1, len(pts) - 1)] - pts[max(i - 1, 0)]).normalized()
+        n = Vector((t.z, 0, -t.x))         # seating side
+        res.append((acc[i] / total, p, t, n))
+    return res
+
+
+SEAT_W = [(0.00, 0.205, 0.05), (0.15, 0.225, 0.10), (0.30, 0.225, 0.085), (0.42, 0.215, 0.13),
+          (0.65, 0.230, 0.13), (0.80, 0.255, 0.16), (0.90, 0.175, 0.13), (1.00, 0.150, 0.09)]
+
+
+def seat_dims(u):
+    for (u0, w0, h0), (u1, w1, h1) in zip(SEAT_W, SEAT_W[1:]):
+        if u <= u1:
+            f = (u - u0) / max(u1 - u0, 1e-6)
+            f = f * f * (3 - 2 * f)
+            return lerp(w0, w1, f), lerp(h0, h1, f)
+    return SEAT_W[-1][1], SEAT_W[-1][2]
+
+
+def seat_profile(w, hb):
+    return [(-w - 0.012, hb - 0.01), (-w + 0.012, hb + 0.006), (-w + 0.05, hb * 0.55), (-w * 0.62, 0.012),
+            (-w * 0.3, -0.004), (0.0, -0.006), (w * 0.3, -0.004), (w * 0.62, 0.012), (w - 0.05, hb * 0.55),
+            (w - 0.012, hb + 0.006), (w + 0.012, hb - 0.01)]
+
+
+def seat_point(base, path_entry, lat, raise_):
+    u, p, t, n = path_entry
+    return base + Vector((p.x + n.x * raise_, lat, p.z + n.z * raise_))
+
+
+def build_bucket_seat(name, coll, M, base, brand):
     objs = []
-    drv = -0.37   # right-hand drive
-    # dash
-    dash = make_box("Dash", (0.70, 0, 0.70), (0.34, 1.30, 0.20), coll, [M["dash"]], bevel=0.03)
-    objs.append(dash)
-    objs.append(make_box("GaugeHood", (0.60, drv, 0.83), (0.16, 0.30, 0.07), coll, [M["suede"]],
-                         rot=(0, math.radians(-10), 0), bevel=0.02))
-    objs.append(make_box("Console", (0.25, 0.0, 0.42), (0.9, 0.22, 0.20), coll, [M["dash"]], bevel=0.02))
-    objs.append(make_box("Floor", (-0.2, 0, 0.21), (2.2, 1.5, 0.02), coll, [M["dash"]]))
-    # steering wheel (deep dish)
-    sw_c = Vector((0.38, drv, 0.86))
-    tilt = math.radians(112)
-    rot = Matrix.Rotation(tilt, 4, "Y")
-    rim = lathe("SteeringWheel_Rim", [(0.172 + 0.016 * math.cos(a), 0.016 * math.sin(a))
-                                      for a in [i * 2 * math.pi / 12 for i in range(12)]],
-                coll, [M["suede"]], segs=48)
-    rim.matrix_world = Matrix.Translation(sw_c) @ rot @ Matrix.Rotation(math.radians(90), 4, "X")
-    objs.append(rim)
+    path = seat_path()
     bm = bmesh.new()
-    for a in (0, 120, 240):
-        aa = math.radians(a + 90)
-        p0 = Vector((0, 0, 0.05))
-        p1 = Vector((0.165 * math.cos(aa), 0.165 * math.sin(aa), 0.0))
-        cylinder_bm(bm, p0, p1, 0.011, 10)
-    cylinder_bm(bm, (0, 0, 0.03), (0, 0, 0.075), 0.035, 24)
-    sp = bm_to_object(bm, "SteeringWheel_Spokes", coll, [M["anodized"]])
-    sp.matrix_world = Matrix.Translation(sw_c) @ rot
-    objs.append(sp)
+    rows = []
+    for entry in path:
+        w, hb = seat_dims(entry[0])
+        rows.append([bm.verts.new(seat_point(base, entry, lat, r)) for lat, r in seat_profile(w, hb)])
+    k = len(rows[0])
+    for i in range(len(rows) - 1):
+        for j in range(k - 1):
+            bm.faces.new((rows[i][j], rows[i][j + 1], rows[i + 1][j + 1], rows[i + 1][j]))
+    shell = bm_to_object(bm, name + "_Shell", coll, [M["gradation"], M["frp"]], recalc=False)
+    so = shell.modifiers.new("Solidify", "SOLIDIFY")
+    so.thickness = 0.022
+    so.offset = -1.0
+    so.material_offset = 1
+    so.material_offset_rim = 1
+    so.use_even_offset = True
+    add_subsurf(shell, 2, 2)
+    objs.append(shell)
+    # harness slots (shoulder) and anti-sub slot
+    bmh = bmesh.new()
+    sh = min(path, key=lambda e: abs(e[0] - 0.82))
+    for s in (-1, 1):
+        c = seat_point(base, sh, s * 0.075, 0.004)
+        box_bm(bmh, c, (0.03, 0.075, 0.03))
+    sub = min(path, key=lambda e: abs(e[0] - 0.12))
+    box_bm(bmh, seat_point(base, sub, 0.0, 0.004), (0.06, 0.05, 0.012))
+    slots = bm_to_object(bmh, name + "_HarnessSlots", coll, [M["frp"]], smooth=False)
+    add_bevel(slots, 0.006, 3, 30)
+    objs.append(slots)
+    # side mounts + rails
     bm = bmesh.new()
-    cylinder_bm(bm, sw_c + rot.to_3x3() @ Vector((0, 0, 0.07)), Vector((0.70, drv, 0.72)), 0.028, 16)
-    objs.append(bm_to_object(bm, "SteeringColumn", coll, [M["dash"]]))
-    # bucket seats
-    for y in (drv, -drv):
-        objs += build_bucket_seat(f"Seat_{'R' if y < 0 else 'L'}", coll, M, Vector((-0.28, y, 0.25)))
-    # hydraulic handbrake + shifter
+    for s in (-1, 1):
+        box_bm(bm, base + Vector((-0.06, s * 0.245, 0.06)), (0.30, 0.008, 0.12))
+        box_bm(bm, base + Vector((-0.02, s * 0.17, -0.035)), (0.48, 0.035, 0.025))
+    mounts = bm_to_object(bm, name + "_Mounts", coll, [M["alu_brushed"]], smooth=False)
+    add_bevel(mounts, 0.003, 2, 30)
+    objs.append(mounts)
     bm = bmesh.new()
-    cylinder_bm(bm, (-0.02, -0.12, 0.52), (0.10, -0.12, 0.88), 0.012, 12)
-    cylinder_bm(bm, (0.10, -0.12, 0.88), (0.115, -0.12, 0.93), 0.02, 16)
-    cylinder_bm(bm, (0.15, 0.0, 0.52), (0.18, 0.0, 0.72), 0.008, 10)
-    hb = bm_to_object(bm, "Handbrake_Shifter", coll, [M["alu_brushed"]])
-    objs.append(hb)
-    sk = bmesh.new()
-    bmesh.ops.create_uvsphere(sk, u_segments=16, v_segments=10, radius=0.028,
-                              matrix=Matrix.Translation((0.183, 0, 0.735)))
-    objs.append(bm_to_object(sk, "ShiftKnob", coll, [M["anodized"]]))
-    # roll cage
-    objs += build_roll_cage(bvh, coll, M)
+    for s in (-1, 1):
+        for xo in (-0.15, 0.05):
+            cylinder_bm(bm, base + Vector((xo, s * 0.25, 0.04)), base + Vector((xo, s * 0.256, 0.04)), 0.011, 6)
+    objs.append(bm_to_object(bm, name + "_Bolts", coll, [M["chrome"]], smooth=False))
+    # embroidered brand on the head rest and on the back of the shell
+    top = min(path, key=lambda e: abs(e[0] - 0.935))
+    u, p, t, n = top
+    loc = seat_point(base, top, 0.0, 0.008)
+    up = Vector((t.x, 0, t.z))
+    # a viewer in front of the seat looks along -n and has +y on their right
+    m = basis_matrix(Vector((0, 1, 0)), Vector((n.x, 0, n.z)), loc)
+    objs.append(place_text(name + "_Logo", brand, 0.045, coll, M["vinyl_white"], m))
+    loc2 = seat_point(base, top, 0.0, -0.03)
+    m2 = basis_matrix(Vector((0, -1, 0)), Vector((-n.x, 0, -n.z)), loc2)
+    objs.append(place_text(name + "_LogoBack", brand, 0.06, coll, M["vinyl_white"], m2))
+    return objs, path
+
+
+def build_harness(name, coll, M, base, path, bar_x, bar_z, brand):
+    """6-point harness draped over the seat to the cam-lock buckle."""
+    objs = []
+
+    def at(u):
+        return min(path, key=lambda e: abs(e[0] - u))
+
+    def on_seat(u, lat, raise_=0.016):
+        e = at(u)
+        return seat_point(base, e, lat, raise_), Vector((e[3].x, 0, e[3].z))
+
+    buckle_e = at(0.17)
+    buckle, bn = on_seat(0.17, 0.0, 0.03)
+    w3 = 0.075
+    for s in (-1, 1):
+        # shoulder strap: harness bar -> over the shoulder slot -> down the back -> buckle
+        ctrl = [Vector((bar_x, base.y + s * 0.10, bar_z)), on_seat(0.86, s * 0.08, 0.03)[0],
+                on_seat(0.74, s * 0.075, 0.02)[0], on_seat(0.55, s * 0.065)[0], on_seat(0.40, s * 0.055)[0],
+                on_seat(0.30, s * 0.04, 0.03)[0], buckle + Vector((0, s * 0.03, 0.012))]
+        pts = smooth_path(ctrl, 40)
+        ups = []
+        for p in pts:
+            # nearest seat normal, or straight up near the harness bar
+            best = min(path, key=lambda e: (seat_point(base, e, 0, 0) - p).length)
+            ups.append(Vector((best[3].x, 0, best[3].z)) if p.x > bar_x + 0.08 else Vector((0, 0, 1)))
+        objs.append(ribbon(f"{name}_Shoulder_{s}", pts, ups, w3, coll, M["harness"]))
+        # shoulder pad with brand
+        pad_p, pad_n = on_seat(0.66, s * 0.07, 0.03)
+        bmp = bmesh.new()
+        box_bm(bmp, (0, 0, 0), (0.09, 0.22, 0.018))
+        pad = bm_to_object(bmp, f"{name}_Pad_{s}", coll, [M["harness"]])
+        pad.matrix_world = basis_matrix(Vector((0, 1, 0)), pad_n, pad_p)
+        add_bevel(pad, 0.007, 3, 30)
+        add_subsurf(pad, 1, 2)
+        objs.append(pad)
+        # text runs up the strap
+        tl = basis_matrix(Vector((-pad_n.z, 0, pad_n.x)), pad_n, pad_p + pad_n * 0.0095)
+        objs.append(place_text(f"{name}_PadText_{s}", brand, 0.03, coll, M["vinyl_white"], tl))
+        # adjuster
+        adj_p, adj_n = on_seat(0.47, s * 0.062, 0.03)
+        bma = bmesh.new()
+        box_bm(bma, (0, 0, 0), (0.09, 0.05, 0.008))
+        adj = bm_to_object(bma, f"{name}_Adjuster_{s}", coll, [M["alu_brushed"]], smooth=False)
+        adj.matrix_world = basis_matrix(Vector((0, 1, 0)), adj_n, adj_p)
+        add_bevel(adj, 0.003, 2, 30)
+        objs.append(adj)
+        # lap belt: seat side slot -> over the thigh bolster -> buckle
+        w, hb = seat_dims(0.30)
+        ctrl = [on_seat(0.33, s * (w + 0.05), -0.04)[0], on_seat(0.30, s * (w - 0.01), hb + 0.02)[0],
+                on_seat(0.22, s * (w * 0.55), 0.05)[0], buckle + Vector((0.01, s * 0.045, 0.004))]
+        pts = smooth_path(ctrl, 20)
+        objs.append(ribbon(f"{name}_Lap_{s}", pts, [Vector((0, 0, 1)) for _ in pts], w3, coll, M["harness"]))
+        # anti-submarine straps
+        ctrl = [on_seat(0.0, s * 0.04, -0.05)[0], on_seat(0.03, s * 0.04, 0.03)[0],
+                buckle + Vector((0.02, s * 0.02, -0.004))]
+        pts = smooth_path(ctrl, 10)
+        objs.append(ribbon(f"{name}_Sub_{s}", pts, [Vector((0, 0, 1)) for _ in pts], 0.05, coll, M["harness"]))
+    # cam-lock buckle
+    bm = bmesh.new()
+    m = basis_matrix(Vector((0, 1, 0)).cross(bn), bn, buckle)
+    cylinder_bm(bm, m @ Vector((0, 0, -0.006)), m @ Vector((0, 0, 0.012)), 0.05, 40)
+    bk = bm_to_object(bm, f"{name}_Buckle", coll, [M["alu_brushed"]])
+    add_bevel(bk, 0.003, 2, 30)
+    objs.append(bk)
+    bm = bmesh.new()
+    cylinder_bm(bm, m @ Vector((0, 0, 0.012)), m @ Vector((0, 0, 0.022)), 0.032, 40)
+    box_bm(bm, m @ Vector((0.0, 0.0, 0.026)), (0.012, 0.012, 0.012))
+    objs.append(bm_to_object(bm, f"{name}_BuckleKnob", coll, [M["anodized"]]))
     return objs
 
 
-def build_bucket_seat(name, coll, M, base):
+# ---------------------------------------------------------------------------
+# steering wheel, gauges, dash
+# ---------------------------------------------------------------------------
+
+
+def build_steering_wheel(coll, M, centre, axis, brand):
+    """Deep-dish 350 mm wheel. Local frame: wheel plane XY, +Y = 12 o'clock, +Z toward the dash."""
     objs = []
-    back_rot = (0, math.radians(-14), 0)
-    objs.append(make_box(name + "_Cushion", base + Vector((0.12, 0, 0.10)), (0.48, 0.42, 0.10), coll,
-                         [M["fabric"]], bevel=0.03))
-    objs.append(make_box(name + "_Back", base + Vector((-0.15, 0, 0.45)), (0.10, 0.44, 0.74), coll,
-                         [M["fabric"]], rot=back_rot, bevel=0.04))
+    a = Vector(axis).normalized()
+    up = Vector((0, 0, 1)) - a * a.z
+    up.normalize()
+    x = up.cross(a)
+    W = basis_matrix(x, a, centre)
+    # rim
+    bm = bmesh.new()
+    torus_bm(bm, 0.1595, 0.0165, 72, 16)
+    rim = bm_to_object(bm, "SteeringWheel_Rim", coll, [M["wheel_suede"]])
+    rim.matrix_world = W
+    add_subsurf(rim, 1, 2)
+    objs.append(rim)
+    # dished spokes (3 spokes, 6 o'clock split) with lightening holes suggested by inner plates
+    bm = bmesh.new()
+    for ang in (0, 180, 255, 285):
+        r = math.radians(ang)
+        d = Vector((math.cos(r), math.sin(r), 0))
+        p_rim = d * 0.150 + Vector((0, 0, 0.004))
+        p_hub = d * 0.040 + Vector((0, 0, 0.088))
+        box_between(bm, p_rim, p_hub, 0.042 if ang in (0, 180) else 0.024, 0.005, Vector((0, 0, 1)))
+    sp = bm_to_object(bm, "SteeringWheel_Spokes", coll, [M["anodized"]], smooth=False)
+    sp.matrix_world = W
+    add_bevel(sp, 0.0015, 2, 30)
+    objs.append(sp)
+    # hub, horn button, quick release, boss
+    bm = bmesh.new()
+    cylinder_bm(bm, (0, 0, 0.080), (0, 0, 0.105), 0.050, 40)
+    hub = bm_to_object(bm, "SteeringWheel_Hub", coll, [M["anodized"]])
+    hub.matrix_world = W
+    add_bevel(hub, 0.004, 3, 30)
+    objs.append(hub)
+    bm = bmesh.new()
+    cylinder_bm(bm, (0, 0, 0.072), (0, 0, 0.082), 0.042, 40)
+    horn = bm_to_object(bm, "SteeringWheel_Horn", coll, [M["leather_black"]])
+    horn.matrix_world = W
+    add_bevel(horn, 0.004, 3, 30)
+    objs.append(horn)
+    # the driver looks along +Z: their right is -X, up is +Y
+    objs.append(place_text("SteeringWheel_Logo", brand, 0.024, coll, M["vinyl_white"],
+                           W @ basis_matrix(Vector((-1, 0, 0)), Vector((0, 0, -1)), (0, 0, 0.0715))))
+    bm = bmesh.new()
+    cylinder_bm(bm, (0, 0, 0.105), (0, 0, 0.150), 0.030, 32)
+    cylinder_bm(bm, (0, 0, 0.118), (0, 0, 0.132), 0.038, 32)
+    qr = bm_to_object(bm, "QuickRelease", coll, [M["alu_brushed"]])
+    qr.matrix_world = W
+    add_bevel(qr, 0.002, 2, 30)
+    objs.append(qr)
+    bm = bmesh.new()
+    cylinder_bm(bm, (0, 0, 0.150), (0, 0, 0.40), 0.026, 24)
+    cylinder_bm(bm, (0, 0, 0.20), (0, 0, 0.40), 0.065, 24)
+    col = bm_to_object(bm, "SteeringColumn", coll, [M["dash"]])
+    col.matrix_world = W
+    add_bevel(col, 0.01, 3, 30)
+    objs.append(col)
+    return objs
+
+
+def build_gauge(name, coll, M, centre, normal, R, mat, labels=None, value=0.0, brand=None, sweep=270.0,
+                label_size=None):
+    objs = []
+    F = facing_frame(centre, normal)
+    disc = polar_disc(name + "_Face", 1.0, coll, mat, rings=8, segs=64)
+    disc.matrix_world = F @ Matrix.Diagonal((R, R, 1, 1))
+    objs.append(disc)
+    bm = bmesh.new()
+    torus_bm(bm, R + 0.003, 0.0045, 48, 10)
+    bz = bm_to_object(bm, name + "_Bezel", coll, [M["chrome"]])
+    bz.matrix_world = F
+    objs.append(bz)
+    bm = bmesh.new()
+    cylinder_bm(bm, (0, 0, -0.045), (0, 0, -0.001), R + 0.006, 40)
+    cup = bm_to_object(bm, name + "_Cup", coll, [M["dash"]])
+    cup.matrix_world = F
+    objs.append(cup)
+    lens = polar_disc(name + "_Glass", R + 0.002, coll, M["lens"], rings=3, segs=48)
+    lens.matrix_world = F @ Matrix.Translation((0, 0, 0.012))
+    objs.append(lens)
+    sw = math.radians(sweep)
+    a0 = math.radians(90 + sweep / 2)
+    if labels:
+        n = len(labels) - 1
+        size = label_size or R * 0.2
+        for i, lab in enumerate(labels):
+            if not lab:
+                continue
+            a = a0 - sw * i / n
+            p = Vector((math.cos(a), math.sin(a), 0)) * R * 0.56 + Vector((0, 0, 0.0008))
+            objs.append(place_text(f"{name}_N{i}", lab, size, coll, M["label"], F @ Matrix.Translation(p), 0.0))
+    if brand:
+        objs.append(place_text(f"{name}_Brand", brand, R * 0.16, coll, M["label"],
+                               F @ Matrix.Translation((0, -R * 0.42, 0.0008)), 0.0))
+    a = a0 - sw * value
+    bm = bmesh.new()
+    d = Vector((math.cos(a), math.sin(a), 0))
+    box_between(bm, -d * R * 0.18 + Vector((0, 0, 0.005)), d * R * 0.86 + Vector((0, 0, 0.005)), R * 0.035, 0.0015,
+                Vector((0, 0, 1)))
+    nd = bm_to_object(bm, name + "_Needle", coll, [M["needle"]], smooth=False)
+    nd.matrix_world = F
+    objs.append(nd)
+    bm = bmesh.new()
+    cylinder_bm(bm, (0, 0, 0.004), (0, 0, 0.008), R * 0.09, 24)
+    cap = bm_to_object(bm, name + "_Pin", coll, [M["anodized"]])
+    cap.matrix_world = F
+    objs.append(cap)
+    return objs
+
+
+def extrude_profile(name, profile, y0, y1, coll, mat, sections=16, xz_fn=None):
+    bm = bmesh.new()
+    rows = []
+    for i in range(sections + 1):
+        y = lerp(y0, y1, i / sections)
+        row = []
+        for (x, z) in profile:
+            if xz_fn:
+                x, z = xz_fn(x, z, y)
+            row.append(bm.verts.new((x, y, z)))
+        rows.append(row)
+    k = len(profile)
+    for i in range(sections):
+        for j in range(k):
+            j1 = (j + 1) % k
+            bm.faces.new((rows[i][j], rows[i][j1], rows[i + 1][j1], rows[i + 1][j]))
+    bm.faces.new(rows[0])
+    bm.faces.new(list(reversed(rows[-1])))
+    return bm_to_object(bm, name, coll, [mat])
+
+
+def build_dashboard(bvh, coll, M):
+    B = CONFIG["brands"]
+    objs = []
+    drv = DRIVER_Y
+    prof = [(0.97, 0.785), (0.82, 0.812), (0.68, 0.805), (0.615, 0.785), (0.598, 0.735), (0.605, 0.62),
+            (0.64, 0.52), (0.72, 0.455), (0.97, 0.445)]
+
+    def shape(x, z, y):
+        # dash wraps slightly forward toward the doors
+        k = (abs(y) / 0.70) ** 4
+        return x + 0.03 * k, z - 0.01 * k
+
+    dash = extrude_profile("Dash", prof, -0.70, 0.70, coll, M["dash_leather"], 28, shape)
+    add_subsurf(dash, 2, 2)
+    objs.append(dash)
+    # instrument binnacle (hood over the gauges)
+    hood_prof = [(0.70, 0.79), (0.66, 0.86), (0.585, 0.878), (0.545, 0.858), (0.552, 0.848),
+                 (0.588, 0.864), (0.652, 0.848), (0.69, 0.79)]
+    hood = extrude_profile("GaugeHood", hood_prof, drv - 0.215, drv + 0.215, coll, M["suede"], 10,
+                           lambda x, z, y: (x, z - 1.4 * ((y - drv) ** 2)))
+    add_subsurf(hood, 2, 2)
+    objs.append(hood)
+    # gauge panel
+    eye = Vector((-0.30, drv, 1.00))
+    tach_c = Vector((0.600, drv, 0.770))
+    n = (eye - tach_c).normalized()
+    F = facing_frame(tach_c, n)
+    bm = bmesh.new()
+    box_bm(bm, (0, 0, -0.012), (0.42, 0.13, 0.012))
+    panel = bm_to_object(bm, "GaugePanel", coll, [M["dash"]], smooth=False)
+    panel.matrix_world = F
+    add_bevel(panel, 0.006, 3, 30)
+    objs.append(panel)
+    objs += build_gauge("Tacho", coll, M, tach_c, n, 0.056, M["gauge_tach"],
+                        labels=[str(i) for i in range(10)], value=0.09)
+    sp_c = F @ Vector((0.128, -0.006, 0))
+    objs += build_gauge("Speedo", coll, M, sp_c, n, 0.047, M["gauge_speed"],
+                        labels=["0", "", "40", "", "80", "", "120", "", "160", "", "200", "", "240"], value=0.0,
+                        label_size=0.0075)
+    for k, (dx, lab) in enumerate(((-0.118, ("C", "", "", "", "H")), (-0.178, ("E", "", "", "", "F")))):
+        c = F @ Vector((dx, -0.012, 0))
+        objs += build_gauge(f"SmallGauge{k}", coll, M, c, n, 0.026, M["gauge_small"], labels=list(lab),
+                            value=0.45 + 0.1 * k, sweep=120.0, label_size=0.007)
+    # triple aftermarket gauge pod on the dash top, angled at the driver
+    pod_c = Vector((0.73, -0.05, 0.835))
+    pn = (eye - pod_c).normalized()
+    PF = facing_frame(pod_c, pn)
+    bm = bmesh.new()
+    box_bm(bm, (0, 0, -0.03), (0.21, 0.075, 0.05))
+    pod = bm_to_object(bm, "GaugePod", coll, [M["dash"]], smooth=False)
+    pod.matrix_world = PF
+    add_bevel(pod, 0.012, 3, 30)
+    objs.append(pod)
+    for k, (lab, val) in enumerate((("BOOST", 0.55), ("OIL", 0.62), ("WATER", 0.48))):
+        c = PF @ Vector((-0.068 + 0.068 * k, 0, 0.0))
+        objs += build_gauge(f"Pod{k}", coll, M, c, pn, 0.027, M["gauge_defi"], value=val, brand=B["gauges"])
+    # centre stack: vents, switch panel, climate knobs
+    stack_n = Vector((-1, 0, 0.12)).normalized()
     for s in (-1, 1):
-        objs.append(make_box(name + f"_Bolster{s}", base + Vector((-0.10, s * 0.24, 0.40)), (0.24, 0.07, 0.62),
-                             coll, [M["fabric_red"]], rot=back_rot, bevel=0.03))
-        objs.append(make_box(name + f"_Wing{s}", base + Vector((-0.04, s * 0.18, 0.88)), (0.20, 0.06, 0.18),
-                             coll, [M["fabric"]], rot=back_rot, bevel=0.025))
-        objs.append(make_box(name + f"_Side{s}", base + Vector((0.12, s * 0.23, 0.17)), (0.44, 0.06, 0.16),
-                             coll, [M["fabric_red"]], bevel=0.025))
-        # harness belts
-        objs.append(make_box(name + f"_Belt{s}", base + Vector((-0.05, s * 0.09, 0.62)), (0.012, 0.05, 0.55),
-                             coll, [M["harness"]], rot=(0, math.radians(-30), 0)))
-    for o in objs:
-        add_subsurf(o, 1, 2)
+        vc = Vector((0.597, s * 0.085, 0.735))
+        VF = facing_frame(vc, stack_n)
+        bm = bmesh.new()
+        box_bm(bm, (0, 0, -0.01), (0.13, 0.055, 0.02))
+        frame = bm_to_object(bm, f"Vent_{s}", coll, [M["satin_black"]], smooth=False)
+        frame.matrix_world = VF
+        add_bevel(frame, 0.004, 2, 30)
+        objs.append(frame)
+        bm = bmesh.new()
+        for i in range(5):
+            box_bm(bm, (0, -0.02 + 0.01 * i, 0.002), (0.12, 0.002, 0.012),
+                   matrix=Matrix.Rotation(math.radians(25), 4, "X"))
+        sl = bm_to_object(bm, f"VentSlats_{s}", coll, [M["dash"]], smooth=False)
+        sl.matrix_world = VF
+        objs.append(sl)
+    sc = Vector((0.606, 0.0, 0.615))
+    SF = facing_frame(sc, stack_n)
+    bm = bmesh.new()
+    box_bm(bm, (0, 0, -0.004), (0.22, 0.13, 0.006))
+    plate = bm_to_object(bm, "SwitchPanel", coll, [M["carbon"]], smooth=False)
+    plate.matrix_world = SF
+    add_bevel(plate, 0.004, 2, 30)
+    objs.append(plate)
+    labels = ["IGN", "FUEL", "FAN", "WIPER", "LIGHT", "START"]
+    for i, lab in enumerate(labels):
+        px = -0.08 + 0.032 * i
+        bm = bmesh.new()
+        cylinder_bm(bm, (px, 0.015, 0.0), (px, 0.015, 0.008), 0.0075, 20)
+        cylinder_bm(bm, (px, 0.015, 0.008), (px, 0.030, 0.024), 0.0028, 10)
+        mat = M["switch_red"] if lab == "START" else M["chrome"]
+        sw = bm_to_object(bm, f"Toggle_{lab}", coll, [mat])
+        sw.matrix_world = SF
+        objs.append(sw)
+        objs.append(place_text(f"ToggleLabel_{lab}", lab, 0.0085, coll, M["label"],
+                               SF @ Matrix.Translation((px, -0.008, 0.0005)), 0.0))
+    for i in range(3):
+        bm = bmesh.new()
+        cylinder_bm(bm, (-0.05 + 0.05 * i, -0.045, 0.0), (-0.05 + 0.05 * i, -0.045, 0.022), 0.016, 32)
+        kn = bm_to_object(bm, f"ClimateKnob_{i}", coll, [M["alu_brushed"]])
+        kn.matrix_world = SF
+        add_bevel(kn, 0.002, 2, 30)
+        objs.append(kn)
+    # kill switch (red key) on the passenger side of the dash
+    kc = Vector((0.600, 0.24, 0.66))
+    KF = facing_frame(kc, stack_n)
+    bm = bmesh.new()
+    cylinder_bm(bm, (0, 0, 0), (0, 0, 0.012), 0.022, 32)
+    objs.append(bm_to_object(bm, "KillSwitchBase", coll, [M["satin_black"]]))
+    objs[-1].matrix_world = KF
+    bm = bmesh.new()
+    box_bm(bm, (0, 0, 0.03), (0.045, 0.012, 0.035))
+    objs.append(bm_to_object(bm, "KillSwitchKey", coll, [M["switch_red"]], smooth=False))
+    objs[-1].matrix_world = KF
+    add_bevel(objs[-1], 0.004, 3, 30)
+    # wide panoramic rear-view mirror
+    loc, nor = ray(bvh, (0.22, 0.0, 0.8), (0, 0, 1))
+    if loc is not None:
+        mc = Vector((0.20, 0.0, loc.z - 0.085))
+        mn = Vector((-1, 0, -0.12)).normalized()
+        MF = facing_frame(mc, mn)
+        bm = bmesh.new()
+        box_bm(bm, (0, 0, -0.012), (0.36, 0.065, 0.022))
+        mb = bm_to_object(bm, "RearViewMirror", coll, [M["satin_black"]], smooth=False)
+        mb.matrix_world = MF
+        add_bevel(mb, 0.008, 3, 30)
+        objs.append(mb)
+        bm = bmesh.new()
+        box_bm(bm, (0, 0, 0.0005), (0.345, 0.052, 0.002))
+        mg = bm_to_object(bm, "RearViewMirrorGlass", coll, [M["mirror_glass"]], smooth=False)
+        mg.matrix_world = MF
+        objs.append(mg)
+        bm = bmesh.new()
+        cylinder_bm(bm, mc + Vector((0.02, 0, 0.0)), Vector((0.24, 0, loc.z - 0.005)), 0.007, 12)
+        objs.append(bm_to_object(bm, "RearViewMirrorStem", coll, [M["satin_black"]]))
+    return objs
+
+
+def build_cockpit_floor(bvh, coll, M):
+    objs = []
+    drv = DRIVER_Y
+    floor = make_box("Floor", (-0.25, 0, 0.168), (2.30, 1.56, 0.012), coll, [M["carpet"]])
+    objs.append(floor)
+    tunnel = make_box("Tunnel", (0.20, 0, 0.26), (1.55, 0.28, 0.20), coll, [M["carpet"]], bevel=0.07)
+    objs.append(tunnel)
+    for s, nm in ((1, "P"), (-1, "D")):
+        mat = make_box(f"FloorMat_{nm}", (0.62, s * 0.37, 0.177), (0.48, 0.44, 0.006), coll, [M["rubber_mat"]],
+                       rot=(0, math.radians(-4), 0), bevel=0.01)
+        objs.append(mat)
+    # firewall / footwell
+    objs.append(make_box("Firewall", (1.00, 0, 0.42), (0.03, 1.5, 0.52), coll, [M["carpet"]],
+                         rot=(0, math.radians(-30), 0)))
+    # pedal box: clutch, brake, throttle, dead pedal
+    bm = bmesh.new()
+    bmp = bmesh.new()
+    for nm, dy, pz, w, h in (("Clutch", 0.13, 0.33, 0.065, 0.075), ("Brake", 0.02, 0.33, 0.075, 0.075),
+                             ("Throttle", -0.10, 0.28, 0.05, 0.13)):
+        y = drv + dy
+        cylinder_bm(bm, (0.93, y, 0.66), (0.86, y, pz + 0.02), 0.009, 10)
+        pad_c = Vector((0.855, y, pz))
+        m = Matrix.Translation(pad_c) @ Matrix.Rotation(math.radians(-22), 4, "Y")
+        box_bm(bmp, (0, 0, 0), (0.008, w, h), matrix=None)
+        for v in bmp.verts[-8:]:
+            v.co = m @ v.co
+        # rubber grip strips
+        for k in range(4):
+            sz = h * (k + 0.5) / 4 - h / 2
+            box_bm(bmp, (0, 0, 0), (0.004, w * 0.9, 0.006))
+            for v in bmp.verts[-8:]:
+                v.co = m @ (v.co + Vector((-0.005, 0, sz)))
+    arms = bm_to_object(bm, "PedalArms", coll, [M["anodized"]])
+    objs.append(arms)
+    pads = bm_to_object(bmp, "PedalPads", coll, [M["alu_brushed"]], smooth=False)
+    add_bevel(pads, 0.0015, 1, 30)
+    objs.append(pads)
+    objs.append(make_box("DeadPedal", (0.86, drv + 0.27, 0.27), (0.01, 0.07, 0.16), coll, [M["alu_brushed"]],
+                         rot=(0, math.radians(-30), 0), bevel=0.003))
+    objs.append(make_box("PedalBox", (0.93, drv + 0.01, 0.66), (0.06, 0.32, 0.05), coll, [M["anodized"]], bevel=0.008))
+    # gear lever with leather boot
+    gx, gy = 0.13, -0.035
+    boot = lathe("ShifterBoot", [(0.0005, 0.50), (0.022, 0.495), (0.045, 0.45), (0.065, 0.40), (0.075, 0.365),
+                                 (0.075, 0.355), (0.0005, 0.355)], coll, [M["leather_black"]], segs=32)
+    # lathe axis is Y; rotate so it stands up along Z
+    boot.matrix_world = Matrix.Translation((gx, gy, 0.0)) @ Matrix.Rotation(math.radians(90), 4, "X")
+    add_subsurf(boot, 1, 2)
+    objs.append(boot)
+    bm = bmesh.new()
+    cylinder_bm(bm, (gx, gy, 0.49), (gx - 0.02, gy, 0.60), 0.0075, 12)
+    objs.append(bm_to_object(bm, "ShiftLever", coll, [M["chrome"]]))
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=24, v_segments=14, radius=0.028,
+                              matrix=Matrix.Translation((gx - 0.022, gy, 0.618)) @ Matrix.Diagonal((1, 1, 0.9, 1)))
+    objs.append(bm_to_object(bm, "ShiftKnob", coll, [M["leather_black"]]))
+    # hydraulic handbrake
+    hx, hy = -0.02, -0.125
+    objs.append(make_box("HandbrakeBase", (hx, hy, 0.38), (0.16, 0.05, 0.05), coll, [M["anodized"]], bevel=0.008))
+    bm = bmesh.new()
+    cylinder_bm(bm, (hx - 0.05, hy, 0.38), (hx + 0.10, hy, 0.74), 0.011, 14)
+    objs.append(bm_to_object(bm, "HandbrakeLever", coll, [M["alu_brushed"]]))
+    bm = bmesh.new()
+    cylinder_bm(bm, (hx + 0.07, hy, 0.67), (hx + 0.115, hy, 0.78), 0.018, 20)
+    grip = bm_to_object(bm, "HandbrakeGrip", coll, [M["rubber_mat"]])
+    add_bevel(grip, 0.006, 3, 30)
+    objs.append(grip)
+    bm = bmesh.new()
+    cylinder_bm(bm, (hx - 0.06, hy - 0.04, 0.40), (hx - 0.06, hy - 0.04, 0.50), 0.02, 20)
+    objs.append(bm_to_object(bm, "HandbrakeReservoir", coll, [M["projector"]]))
+    # fire extinguisher on the passenger side of the tunnel
+    bm = bmesh.new()
+    cylinder_bm(bm, (0.28, 0.21, 0.24), (0.58, 0.21, 0.24), 0.048, 32)
+    ext = bm_to_object(bm, "FireExtinguisher", coll, [M["extinguisher"]])
+    add_bevel(ext, 0.02, 4, 30)
+    objs.append(ext)
+    bm = bmesh.new()
+    cylinder_bm(bm, (0.58, 0.21, 0.24), (0.64, 0.21, 0.24), 0.018, 16)
+    box_bm(bm, (0.64, 0.21, 0.26), (0.03, 0.02, 0.05))
+    objs.append(bm_to_object(bm, "ExtinguisherValve", coll, [M["chrome"]]))
+    for x in (0.34, 0.52):
+        bm = bmesh.new()
+        torus_bm(bm, 0.051, 0.004, 32, 6, matrix=Matrix.Translation((x, 0.21, 0.24)) @ Matrix.Rotation(math.radians(90), 4, "Y"))
+        objs.append(bm_to_object(bm, f"ExtinguisherStrap_{x}", coll, [M["alu_brushed"]]))
+    # centre console between the seats
+    objs.append(make_box("Console", (-0.32, 0.03, 0.40), (0.30, 0.14, 0.12), coll, [M["leather_black"]], bevel=0.03))
+    # rear seat delete panel
+    objs.append(make_box("RearPanel", (-0.80, 0, 0.42), (0.012, 1.42, 0.46), coll, [M["alu_brushed"]],
+                         rot=(0, math.radians(-12), 0)))
+    return objs
+
+
+def build_door_cards(bvh, coll, M):
+    objs = []
+    for s in (1, -1):
+        corners = [(0.80, 0.0, 0.30), (-0.36, 0.0, 0.30), (-0.36, 0.0, 0.80), (0.80, 0.0, 0.80)]
+        g = patch_grid(bvh, corners, (0, s, 0), 14, 6, back=0.0)
+        card = lens_from_grid(f"DoorCard_{'L' if s > 0 else 'R'}", g, coll, M["carbon"], offset=0.035)
+        so = card.modifiers.new("Solidify", "SOLIDIFY")
+        so.thickness = 0.004
+        objs.append(card)
+        # pull strap
+        p, nrm = grid_point(g, 0.45, 0.62)
+        pts = [p + nrm * 0.036 + Vector((dx, 0, 0)) for dx in (-0.10, -0.06, 0.0, 0.06, 0.10)]
+        pts = [pt + nrm * (0.03 * math.sin(math.pi * i / 4)) for i, pt in enumerate(pts)]
+        objs.append(ribbon(f"DoorPull_{s}", pts, [Vector((0, -s, 0)) for _ in pts], 0.035, coll, M["harness"]))
+        objs[-1].modifiers["Solidify"].thickness = 0.004
+    return objs
+
+
+def build_window_trim(sills, coll, M):
+    """Rubber seal + inner door top along the bottom of the wound-down windows."""
+    objs = []
+    for s, pts in sills.items():
+        if len(pts) < 2:
+            continue
+        # thin the edge loop to ~2 cm spacing
+        keep = [pts[0]]
+        for p in pts[1:]:
+            if (p - keep[-1]).length > 0.02:
+                keep.append(p)
+        seal = [p + Vector((0, -s * 0.004, 0.002)) for p in keep]
+        objs.append(tube_curve(f"WindowSeal_{s}", seal, 0.0055, coll, M["rubber_seal"], smooth_corners=False))
+        bm = bmesh.new()
+        a = [bm.verts.new(p + Vector((0, -s * 0.006, -0.001))) for p in keep]
+        b = [bm.verts.new(p + Vector((0, -s * 0.06, -0.006))) for p in keep]
+        for i in range(len(a) - 1):
+            bm.faces.new((a[i], a[i + 1], b[i + 1], b[i]))
+        objs.append(bm_to_object(bm, f"DoorTop_{s}", coll, [M["satin_black"]]))
+    return objs
+
+
+def build_interior(bvh, coll, M):
+    B = CONFIG["brands"]
+    objs = []
+    drv = DRIVER_Y
+    objs += build_dashboard(bvh, coll, M)
+    objs += build_cockpit_floor(bvh, coll, M)
+    objs += build_door_cards(bvh, coll, M)
+    # steering wheel: column axis points forward and down into the dash
+    objs += build_steering_wheel(coll, M, Vector((0.235, drv, 0.80)), Vector((0.93, 0, -0.37)), B["steering"])
+    # seats + harnesses
+    for y in (drv, -drv):
+        base = Vector((SEAT_BASE_X, y, SEAT_BASE_Z))
+        nm = f"Seat_{'R' if y < 0 else 'L'}"
+        so, path = build_bucket_seat(nm, coll, M, base, B["seat"])
+        objs += so
+        objs += build_harness(nm + "_Harness", coll, M, base, path, -0.60, 0.80, B["harness"])
+    objs += build_roll_cage(bvh, coll, M)
     return objs
 
 
@@ -1502,15 +2359,27 @@ def build_roll_cage(bvh, coll, M):
         mh_bot = Vector((-0.62, s * 0.66, 0.22))
         fh_bot = Vector((0.82, s * 0.62, 0.32))
         objs.append(tube_curve(f"Cage_A_{s}", [fh_bot, a_mid, fh_top, mh_top], r, coll, mat))
-        objs.append(tube_curve(f"Cage_Door_{s}", [mh_bot + Vector((0, 0, 0.35)), Vector((0.1, s * 0.71, 0.48)),
-                                                  fh_bot + Vector((-0.05, 0, 0.20))], r, coll, mat))
+        door = [mh_bot + Vector((0, 0, 0.35)), Vector((0.1, s * 0.71, 0.48)), fh_bot + Vector((-0.05, 0, 0.20))]
+        objs.append(tube_curve(f"Cage_Door_{s}", door, r, coll, mat))
         rear = Vector((-1.55, s * 0.58, 0.40))
         objs.append(tube_curve(f"Cage_RearStay_{s}", [mh_top, rear], r, coll, mat, smooth_corners=False))
+        # padding on the door bars and the driver's A-pillar
+        objs.append(tube_curve(f"CagePad_Door_{s}", [door[0] + Vector((0.15, 0.0, 0.04)), door[1],
+                                                     door[2] + Vector((-0.15, 0.0, -0.04))],
+                               0.034, coll, M["foam"]))
+        # base plates
+        for p in (mh_bot, fh_bot):
+            objs.append(make_box(f"CagePlate_{s}_{p.x:.2f}", (p.x, p.y, 0.178), (0.12, 0.10, 0.008), coll,
+                                 [M["cage"]], bevel=0.003))
     tl, tr = inset(-0.62, 0.62, 0.55), inset(-0.62, -0.62, 0.55)
     objs.append(tube_curve("Cage_MainHoop", [Vector((-0.62, 0.66, 0.22)), tl,
                                              (tl + tr) / 2 + Vector((0, 0, 0.02)), tr,
                                              Vector((-0.62, -0.66, 0.22))], r, coll, mat))
+    objs.append(tube_curve("CagePad_Halo", [tl.lerp(tr, 0.12), (tl + tr) / 2 + Vector((0, 0, 0.02)), tl.lerp(tr, 0.88)],
+                           0.036, coll, M["foam"]))
     objs.append(tube_curve("Cage_Diagonal", [tl, Vector((-0.62, -0.62, 0.30))], r, coll, mat, smooth_corners=False))
+    objs.append(tube_curve("Cage_HarnessBar", [Vector((-0.615, 0.63, 0.80)), Vector((-0.615, -0.63, 0.80))],
+                           r, coll, mat, smooth_corners=False))
     fl, fr = inset(0.15, 0.62, 0.55), inset(0.15, -0.62, 0.55)
     objs.append(tube_curve("Cage_Header", [fl, (fl + fr) / 2 + Vector((0, 0, 0.02)), fr], r, coll, mat))
     return objs
@@ -1690,6 +2559,24 @@ def build_car(col_car, M):
     for c in list(cut_coll.objects):
         bpy.data.objects.remove(c, do_unlink=True)
     bpy.data.collections.remove(cut_coll)
+    if CONFIG["windows_down"]:
+        tint = list(body.data.materials).index(M["glass_tint"])
+        bm = bmesh.new()
+        bm.from_mesh(body.data)
+        gone = [f for f in bm.faces if f.material_index == tint and
+                B_PILLAR[1] + 0.005 < f.calc_center_median().x < SIDE_WINDOW[1] and abs(f.calc_center_median().y) > 0.3]
+        bmesh.ops.delete(bm, geom=gone, context="FACES")
+        # bottom edge of each opening = where the door top / seal goes
+        sills = {}
+        for sgn in (1, -1):
+            vs = {v for e in bm.edges if e.is_boundary for v in e.verts
+                  if v.co.y * sgn > 0.3 and B_PILLAR[1] - 0.02 < v.co.x < SIDE_WINDOW[1] + 0.02}
+            if vs:
+                zmin = min(v.co.z for v in vs)
+                sills[sgn] = sorted((v.co.copy() for v in vs if v.co.z < zmin + 0.025), key=lambda c: c.x)
+        bm.to_mesh(body.data)
+        bm.free()
+        objs += build_window_trim(sills, col_car, M)
     objs.append(body)
     objs += lights_parts
 
@@ -1982,10 +2869,17 @@ def build_livery(body, bvh, coll, M):
         # quarter-panel lettering
         loc2, nor2 = ray(bvh, (-1.62, s * 3, 0.835), (0, -s, 0))
         if loc2 is not None:
-            tt = text_object(f"Quarter_Text_{s}", "DRIFT SPEC", 0.045, coll, M["vinyl_white"])
+            sp = CONFIG["brands"]["sponsors"]
+            tt = text_object(f"Quarter_Text_{s}", "  ".join(sp[1:]), 0.042, coll, M["vinyl_white"])
             tt.matrix_world = basis_matrix((-s, 0, 0), nor2, loc2 + nor2 * 0.004)
             shrinkwrap(tt, body, 0.002)
             objs.append(tt)
+        # big sponsor lettering on the carbon side skirt
+        xs = 0.06
+        ys = side_y(bvh, xs, 0.24, 0.88, s)
+        nrm = Vector((0, s, 0.25)).normalized()
+        objs.append(place_text(f"Skirt_Text_{s}", CONFIG["brands"]["sponsors"][0], 0.075, coll, M["vinyl_white"],
+                               basis_matrix((-s, 0, 0), nrm, (xs, s * (ys + 0.044), 0.188)), 0.0006))
         # side stripe along the skirt line
         g3 = patch_grid(bvh, [(1.0 if s < 0 else -0.85, s * 3, 0.29), (-0.85 if s < 0 else 1.0, s * 3, 0.29),
                               (-0.85 if s < 0 else 1.0, s * 3, 0.305), (1.0 if s < 0 else -0.85, s * 3, 0.305)],
@@ -2239,6 +3133,9 @@ def build_cameras(coll, car_root):
         "rear": ((-5.6, -3.6, 0.85), (-0.5, 0.0, 0.6), 48, 2.8),
         "top": ((4.5, 4.5, 4.0), (-0.3, 0.0, 0.4), 40, 5.6),
         "wheel": ((2.35, 1.75, 0.42), (1.30, 0.80, 0.33), 60, 2.0),
+        "cockpit": ((-0.50, 0.04, 1.08), (0.45, -0.33, 0.74), 17, 4.0),
+        "door": ((-0.05, 1.75, 1.18), (0.20, -0.30, 0.66), 20, 4.0),
+        "seat": ((0.55, 0.30, 0.95), (-0.25, -0.37, 0.62), 20, 3.2),
     }
     for name, (loc, tgt, lens, fstop) in specs.items():
         cd = bpy.data.cameras.new(f"Cam_{name}")
@@ -2323,6 +3220,9 @@ def setup_render(args):
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
+
+
+INTERIOR_CAMS = ("cockpit", "door", "seat")
 
 
 class Args:
@@ -2418,6 +3318,12 @@ def main():
     cams = build_cameras(col_cam, car_root)
     scn.camera = cams.get(args.cam, cams["hero"])
     setup_render(args)
+    if args.cam in INTERIOR_CAMS:
+        # interiors are darker than the street outside: open up the exposure and skip the smoke
+        scn.view_settings.exposure = 1.7
+        smoke = bpy.data.objects.get("TyreSmoke")
+        if smoke:
+            smoke.hide_render = True
     scn.frame_set(1)
 
     if args.save:
